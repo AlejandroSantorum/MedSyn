@@ -618,7 +618,7 @@ class GaussianDiffusion(nn.Module):
             loss_type='l1',
             use_dynamic_thres=False,  # from the Imagen paper
             dynamic_thres_percentile=0.9,
-            volume_depth=128,
+            # volume_depth=128,  # not used
             ddim_timesteps=50,
     ):
         super().__init__()
@@ -626,7 +626,7 @@ class GaussianDiffusion(nn.Module):
         self.image_size = image_size
         self.num_frames = num_frames
         self.denoise_fn = denoise_fn
-        self.volume_depth = volume_depth
+        # not used: self.volume_depth = volume_depth
 
         self.num_timesteps = int(timesteps)
         self.loss_type = loss_type
@@ -1059,12 +1059,12 @@ if __name__ == '__main__':
 
     model = Unet3D(
         dim=160,
-        cond_dim=768,
+        # cond_dim=768,  # used for BERT text conditioning
         dim_mults=(1, 2, 4, 8),
-        channels=4,
+        channels=1, # 4, # originally 4 channels
         attn_heads=8,
         attn_dim_head=32,
-        use_bert_text_cond=False,
+        # use_bert_text_cond=False,  # used for BERT text conditioning
         init_dim=None,
         init_kernel_size=7,
         use_sparse_linear_attn=True,
@@ -1072,34 +1072,37 @@ if __name__ == '__main__':
         resnet_groups=8
     )
 
+    # image of size (N, D, H, W) = (1, 64, 64, 64)
     diffusion_model = GaussianDiffusion(
         denoise_fn=model,
-        image_size=64,
-        num_frames=64,
+        image_size=64,  # 64 x 64
+        num_frames=64,  # 64
         text_use_bert_cls=False,
-        channels=4,
+        channels=1,  # 4, # originally 4 channels 
         timesteps=1000,
         use_dynamic_thres=False,  # from the Imagen paper
         dynamic_thres_percentile=0.995,
-        volume_depth=64,
+        # volume_depth=64,  # not used
         ddim_timesteps=50,
     )
 
-    trainer = Trainer(diffusion_model=diffusion_model,
-                      folder=args.data_dir,
-                      prompt_folder=args.prompt_dir,
-                      ema_decay=0.999,
-                      train_batch_size=1,
-                      train_lr=1e-4,
-                      train_num_steps=1000000,
-                      gradient_accumulate_every=4,
-                      amp=True,
-                      step_start_ema=10000,
-                      update_ema_every=1,
-                      save_and_sample_every=1000,
-                      results_folder=args.save_dir,
-                      num_sample_rows=1,
-                      max_grad_norm=1.0)
+    trainer = Trainer(
+        diffusion_model=diffusion_model,
+        folder=args.data_dir,
+        prompt_folder=args.prompt_dir,
+        ema_decay=0.999,
+        train_batch_size=1,
+        train_lr=1e-4,
+        train_num_steps=1000000,
+        gradient_accumulate_every=4,
+        amp=True,
+        step_start_ema=10000,
+        update_ema_every=1,
+        save_and_sample_every=1000,
+        results_folder=args.save_dir,
+        num_sample_rows=1,
+        max_grad_norm=1.0,
+    )
 
     if args.resume:
         trainer.load(-1)
