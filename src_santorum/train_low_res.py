@@ -1,6 +1,7 @@
 import math
 import copy
 import torch
+import random
 import numpy as np
 from torch import nn, einsum
 import torch.nn.functional as F
@@ -14,7 +15,8 @@ from PIL import Image
 
 from tqdm import tqdm
 from einops import rearrange
-from dataloader import cache_transformed_train_data
+import nibabel as nib
+# from dataloader import cache_transformed_train_data
 import os
 from einops_exts import check_shape, rearrange_many
 
@@ -25,6 +27,11 @@ import xformers, xformers.ops
 from utils import *
 
 import argparse
+
+def set_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
 
 # relative positional bias
 
@@ -837,60 +844,77 @@ def cast_num_frames(t, *, frames):
 
 class Dataset(data.Dataset):
     def __init__(
-            self,
-            folder,
-            image_size,
-            channels=3,
-            num_frames=16,
-            horizontal_flip=False,
-            force_num_frames=True,
-            exts=['gif']
+        self,
+        folder,
+        num_max_samples=1000,
+        test_flag=False,
+        dataset_seed=None,
+        exts=['nii.gz'],
     ):
+        """
+
+        """
         super().__init__()
         self.folder = folder
-        self.image_size = image_size
-        self.channels = channels
-        self.paths = [p for ext in exts for p in Path(f'{folder}').glob(f'**/*.{ext}')]
+        self.paths = [
+            p.as_posix() for ext in exts for p in Path(f'{folder}').glob(f'**/*-t1n.{ext}')
+        ]
 
-        self.cast_num_frames_fn = partial(cast_num_frames, frames=num_frames) if force_num_frames else identity
+        if dataset_seed is not None:
+            print(f"Setting dataset seed to {dataset_seed} ...")
+            np.random.seed(int(dataset_seed))
+            torch.manual_seed(int(dataset_seed))
 
-        self.transform = T.Compose([
-            T.Resize(image_size),
-            T.RandomHorizontalFlip() if horizontal_flip else T.Lambda(identity),
-            T.CenterCrop(image_size),
-            T.ToTensor()
-        ])
+        np.random.shuffle(self.paths)
+
+        if num_max_samples is not None:
+            if test_flag:
+                print(f"Reading the last {num_max_samples} samples ...")
+                # using the last 'num_max_samples' samples
+                self.paths = self.paths[-int(num_max_samples):]
+            else:
+                print(f"Reading the first {num_max_samples} samples ...")
+                # using the first 'num_max_samples' samples
+                self.paths = self.paths [:int(num_max_samples)]
 
     def __len__(self):
         return len(self.paths)
 
     def __getitem__(self, index):
         path = self.paths[index]
-        tensor = gif_to_tensor(path, self.channels, transform=self.transform)
-        return self.cast_num_frames_fn(tensor)
-
+        # read image data as numpy array
+        img_data = nib.load(path).get_fdata()
+        # normalize between 0 and 255
+        img_data = 255.0 * (img_data - img_data.min()) / (img_data.max() - img_data.min())
+        img_data = img_data.astype(np.uint8)
+        # convert to tensor
+        tensor = torch.from_numpy(img_data)
+        return tensor.unsqueeze(0).float()
 
 # trainer class
 
 class Trainer(object):
     def __init__(
-            self,
-            diffusion_model,
-            folder,
-            prompt_folder,
-            *,
-            ema_decay=0.995,
-            train_batch_size=32,
-            train_lr=1e-4,
-            train_num_steps=100000,
-            gradient_accumulate_every=2,
-            amp=False,
-            step_start_ema=2000,
-            update_ema_every=10,
-            save_and_sample_every=1000,
-            results_folder='./results',
-            num_sample_rows=4,
-            max_grad_norm=None
+        self,
+        diffusion_model,
+        folder,
+        # prompt_folder,
+        *,
+        dataset_num_max_samples=1000,
+        dataset_test_flag=False,
+        dataset_seed=42,
+        ema_decay=0.995,
+        train_batch_size=32,
+        train_lr=1e-4,
+        train_num_steps=100000,
+        gradient_accumulate_every=2,
+        amp=False,
+        step_start_ema=2000,
+        update_ema_every=10,
+        save_and_sample_every=1000,
+        results_folder='./results',
+        num_sample_rows=4,
+        max_grad_norm=None
     ):
         super().__init__()
         self.model = diffusion_model
@@ -909,18 +933,14 @@ class Trainer(object):
         image_size = diffusion_model.image_size
         self.num_frames = diffusion_model.num_frames
 
-        train_files = []
+        self.ds = Dataset(
+            folder=folder,
+            num_max_samples=dataset_num_max_samples,
+            test_flag=dataset_test_flag,
+            dataset_seed=dataset_seed,
+        )
 
-        for img_dir in os.listdir(folder):
-            train_files.append({"image": os.path.join(folder, img_dir),
-                                'text': os.path.join(prompt_folder,
-                                                     img_dir)
-                                })
-
-        self.ds = cache_transformed_train_data(shape=[self.num_frames, image_size, image_size],
-                                                   train_files=train_files)
-
-        print(f'found {len(self.ds)} videos as gif files at {folder}')
+        print(f'Found {len(self.ds)} 3D images at {folder}')
         assert len(self.ds) > 0, 'need to have at least 1 video to start training (although 1 is not great, try 100k)'
 
         self.dl = cycle(data.DataLoader(self.ds, batch_size=train_batch_size, num_workers=8, shuffle=True, pin_memory=True))
@@ -1050,10 +1070,14 @@ if __name__ == '__main__':
 
     parser.add_argument('--data_dir', type=str, default="",
                         help='Your Training DATA Path')
-    parser.add_argument('--prompt_dir', type=str, default="",
-                        help='Your Training DATA of Prompt Path')
     parser.add_argument('--save_dir', type=str, default="",
                         help='Your Logs Saving Path')
+    parser.add_argument('--dataset_num_samples', type=int, default=1000,
+                        help='Your Training DATA Number of Samples')
+    parser.add_argument('--dataset_seed', type=int, default=42,
+                        help='Your Training DATA Seed')
+    parser.add_argument('--train_seed', type=int, default=42,
+                        help='Your Training Seed')
 
     args = parser.parse_args()
 
@@ -1089,7 +1113,9 @@ if __name__ == '__main__':
     trainer = Trainer(
         diffusion_model=diffusion_model,
         folder=args.data_dir,
-        prompt_folder=args.prompt_dir,
+        dataset_num_max_samples=args.dataset_num_samples,
+        dataset_seed=args.dataset_seed,
+        dataset_test_flag=False,
         ema_decay=0.999,
         train_batch_size=1,
         train_lr=1e-4,
@@ -1103,6 +1129,10 @@ if __name__ == '__main__':
         num_sample_rows=1,
         max_grad_norm=1.0,
     )
+
+    if args.train_seed is not None:
+        print(f"Setting train seed to {args.train_seed} ...")
+        set_seed(int(args.train_seed))
 
     if args.resume:
         trainer.load(-1)
