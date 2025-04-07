@@ -402,20 +402,20 @@ class Attention(nn.Module):
 
 class Unet3D(nn.Module):
     def __init__(
-            self,
-            dim,
-            cond_dim=None,
-            dim_mults=(1, 2, 4, 8),
-            channels=3,
-            attn_heads=8,
-            attn_dim_head=32,
-            total_slices=256,
-            use_bert_text_cond=False,
-            init_dim=None,
-            init_kernel_size=7,
-            use_sparse_linear_attn=True,
-            block_type='resnet',
-            resnet_groups=8
+        self,
+        dim,
+        cond_dim=None,
+        dim_mults=(1, 2, 4, 8),
+        channels=3,
+        attn_heads=8,
+        attn_dim_head=32,
+        total_slices=256,
+        use_bert_text_cond=False,
+        init_dim=None,
+        init_kernel_size=7,
+        use_sparse_linear_attn=True,
+        block_type='resnet',
+        resnet_groups=8
     ):
         super().__init__()
 
@@ -514,10 +514,10 @@ class Unet3D(nn.Module):
         )
 
     def forward_with_cond_scale(
-            self,
-            *args,
-            cond_scale=2.,
-            **kwargs
+        self,
+        *args,
+        cond_scale=2.,
+        **kwargs
     ):
         logits = self.forward(*args, null_cond_prob=0., **kwargs)
         if cond_scale == 1 or not self.has_cond:
@@ -615,19 +615,19 @@ def cosine_beta_schedule(timesteps, s=0.008):
 
 class GaussianDiffusion(nn.Module):
     def __init__(
-            self,
-            denoise_fn,
-            *,
-            image_size,
-            num_frames,
-            text_use_bert_cls=False,
-            channels=3,
-            timesteps=1000,
-            loss_type='l1',
-            use_dynamic_thres=False,  # from the Imagen paper
-            dynamic_thres_percentile=0.9,
-            # volume_depth=128,  # not used
-            ddim_timesteps=50,
+        self,
+        denoise_fn,
+        *,
+        image_size,
+        num_frames,
+        text_use_bert_cls=False,
+        channels=3,
+        timesteps=1000,
+        loss_type='l1',
+        use_dynamic_thres=False,  # from the Imagen paper
+        dynamic_thres_percentile=0.9,
+        # volume_depth=128,  # not used
+        ddim_timesteps=50,
     ):
         super().__init__()
         self.channels = channels
@@ -720,7 +720,7 @@ class GaussianDiffusion(nn.Module):
 
     @torch.inference_mode()
     def p_sample_loop(self, shape, cond=None, cond_scale=1., use_ddim=True):
-        device = self.betas.device
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
         bsz = shape[0]
 
@@ -749,7 +749,7 @@ class GaussianDiffusion(nn.Module):
         return unnormalize_img(img)
 
     @torch.inference_mode()
-    def sample(self, cond=None, cond_scale=2., batch_size=16, DDIM=True):
+    def sample(self, cond=None, cond_scale=1., batch_size=16, DDIM=True):
 
         batch_size = cond.shape[0] if exists(cond) else batch_size
         image_size = self.image_size
@@ -905,7 +905,6 @@ class Trainer(object):
         # prompt_folder,
         *,
         dataset_num_max_samples=1000,
-        dataset_test_flag=False,
         dataset_seed=42,
         ema_decay=0.995,
         train_batch_size=32,
@@ -940,8 +939,8 @@ class Trainer(object):
         self.ds = Dataset(
             folder=folder,
             num_max_samples=dataset_num_max_samples,
-            test_flag=dataset_test_flag,
             dataset_seed=dataset_seed,
+            test_flag=False,
         )
 
         print(f'Found {len(self.ds)} 3D images at {folder}')
@@ -1120,7 +1119,6 @@ if __name__ == '__main__':
         folder=args.data_dir,
         dataset_num_max_samples=args.dataset_num_samples,
         dataset_seed=args.dataset_seed,
-        dataset_test_flag=False,
         ema_decay=0.999,
         train_batch_size=4,
         train_lr=1e-4,
