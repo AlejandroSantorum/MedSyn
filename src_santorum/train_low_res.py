@@ -1,3 +1,4 @@
+import os
 import math
 import copy
 import torch
@@ -10,15 +11,11 @@ from functools import partial
 from torch.utils import data
 from pathlib import Path
 from torch.optim import AdamW
-from torchvision import transforms as T
 from PIL import Image
 
 from tqdm import tqdm
 from einops import rearrange
 import nibabel as nib
-# from dataloader import cache_transformed_train_data
-import os
-from einops_exts import check_shape, rearrange_many
 
 from accelerate import Accelerator
 
@@ -254,7 +251,9 @@ class SpatialLinearAttention(nn.Module):
         x = rearrange(x, 'b c f h w -> (b f) c h w')
 
         qkv = self.to_qkv(x).chunk(3, dim=1)
-        q, k, v = rearrange_many(qkv, 'b (h c) x y -> (b h) (x y) c', h=self.heads)
+        q = rearrange(qkv[0], 'b (h c) x y -> (b h) (x y) c', h=self.heads)
+        k = rearrange(qkv[1], 'b (h c) x y -> (b h) (x y) c', h=self.heads)
+        v = rearrange(qkv[2], 'b (h c) x y -> (b h) (x y) c', h=self.heads)
 
         query = q.contiguous()
         key = k.contiguous()
@@ -352,7 +351,9 @@ class Attention(nn.Module):
 
         # split out heads
 
-        q, k, v = rearrange_many(qkv, '... n (h d) -> ... h n d', h=self.heads)
+        q = rearrange(qkv[0], '... n (h d) -> ... h n d', h=self.heads)
+        k = rearrange(qkv[1], '... n (h d) -> ... h n d', h=self.heads)
+        v = rearrange(qkv[2], '... n (h d) -> ... h n d', h=self.heads)
 
         # scale
 
@@ -480,19 +481,19 @@ class Unet3D(nn.Module):
         spatial_attn = EinopsToAndFrom('b c f h w', 'b f (h w) c', Attention(mid_dim, heads=attn_heads))
 
         self.mid_spatial_attn1 = Residual(PreNorm(mid_dim, spatial_attn))
-        self.mid_cross_attn1 = Residual(PreNorm(mid_dim, CrossAttention(mid_dim, heads=attn_heads, dim_con=cond_dim)))
+        # self.mid_cross_attn1 = Residual(PreNorm(mid_dim, CrossAttention(mid_dim, heads=attn_heads, dim_con=cond_dim)))
         self.mid_temporal_attn1 = block_klass_cond3d(mid_dim, mid_dim)
         ###
         self.mid_spatial_attn2 = Residual(PreNorm(mid_dim, spatial_attn))
-        self.mid_cross_attn2 = Residual(PreNorm(mid_dim, CrossAttention(mid_dim, heads=attn_heads, dim_con=cond_dim)))
+        # self.mid_cross_attn2 = Residual(PreNorm(mid_dim, CrossAttention(mid_dim, heads=attn_heads, dim_con=cond_dim)))
         self.mid_temporal_attn2 = block_klass_cond3d(mid_dim, mid_dim)
         ###
         self.mid_spatial_attn3 = Residual(PreNorm(mid_dim, spatial_attn))
-        self.mid_cross_attn3 = Residual(PreNorm(mid_dim, CrossAttention(mid_dim, heads=attn_heads, dim_con=cond_dim)))
+        # self.mid_cross_attn3 = Residual(PreNorm(mid_dim, CrossAttention(mid_dim, heads=attn_heads, dim_con=cond_dim)))
         self.mid_temporal_attn3 = block_klass_cond3d(mid_dim, mid_dim)
         ###
         self.mid_spatial_attn4 = Residual(PreNorm(mid_dim, spatial_attn))
-        self.mid_cross_attn4 = Residual(PreNorm(mid_dim, CrossAttention(mid_dim, heads=attn_heads, dim_con=cond_dim)))
+        # self.mid_cross_attn4 = Residual(PreNorm(mid_dim, CrossAttention(mid_dim, heads=attn_heads, dim_con=cond_dim)))
         self.mid_temporal_attn4 = block_klass_cond3d(mid_dim, mid_dim)
 
         self.mid_block2 = block_klass_cond(mid_dim, mid_dim)
@@ -563,19 +564,19 @@ class Unet3D(nn.Module):
         x = self.mid_block1(x, t)
         ###
         x = self.mid_spatial_attn1(x)
-        x = self.mid_cross_attn1(x, kv=cond)
+        # x = self.mid_cross_attn1(x, kv=cond)
         x = self.mid_temporal_attn1(x, t)
         ###
         x = self.mid_spatial_attn2(x)
-        x = self.mid_cross_attn2(x, kv=cond)
+        # x = self.mid_cross_attn2(x, kv=cond)
         x = self.mid_temporal_attn2(x, t)
         ###
         x = self.mid_spatial_attn3(x)
-        x = self.mid_cross_attn3(x, kv=cond)
+        # x = self.mid_cross_attn3(x, kv=cond)
         x = self.mid_temporal_attn3(x, t)
         ###
         x = self.mid_spatial_attn4(x)
-        x = self.mid_cross_attn4(x, kv=cond)
+        # x = self.mid_cross_attn4(x, kv=cond)
         x = self.mid_temporal_attn4(x, t)
         ###
         x = self.mid_block2(x, t)
@@ -773,7 +774,10 @@ class GaussianDiffusion(nn.Module):
 
     def forward(self, x, *args, **kwargs):
         b, device, img_size, = x.shape[0], x.device, self.image_size
-        check_shape(x, 'b c f h w', c=self.channels, f=self.num_frames, h=img_size, w=img_size)
+        b, c, f, h, w = x.shape
+        assert h == img_size and w == img_size, f'input image size {h}x{w} does not match model image size {img_size}x{img_size}'
+        assert f == self.num_frames, f'input number of frames {f} does not match model number of frames {self.num_frames}'
+        assert c == self.channels, f'input number of channels {c} does not match model number of channels {self.channels}'
         t = torch.rand((b), device=device).float()
         return self.p_losses(x, t, *args, **kwargs)
 
@@ -811,10 +815,10 @@ def video_tensor_to_gif(tensor, path, duration=120, loop=0, optimize=True):
 
 # gif -> (channels, frame, height, width) tensor
 
-def gif_to_tensor(path, channels=3, transform=T.ToTensor()):
-    img = Image.open(path)
-    tensors = tuple(map(transform, seek_all_images(img, channels=channels)))
-    return torch.stack(tensors, dim=1)
+# def gif_to_tensor(path, channels=3, transform=T.ToTensor()):
+#     img = Image.open(path)
+#     tensors = tuple(map(transform, seek_all_images(img, channels=channels)))
+#     return torch.stack(tensors, dim=1)
 
 
 def identity(t, *args, **kwargs):
@@ -1006,9 +1010,9 @@ class Trainer(object):
             for i in range(self.gradient_accumulate_every):
                 with self.accelerator.accumulate(self.model):
                     data = next(self.dl)
-                    img, text = data["image"], data["text"]
-                    img = img.to(self.accelerator.device).squeeze(dim=1)
-                    text = text.to(self.accelerator.device)
+                    img = data  # , text = data["image"], data["text"]
+                    img = img.to(self.accelerator.device) # img.to(self.accelerator.device).squeeze(dim=1)
+                    # text = text.to(self.accelerator.device)
                     B, C, D, H, W = img.shape
 
                     batch_images_inputs = img
@@ -1018,7 +1022,7 @@ class Trainer(object):
                     loss = self.model(
                         batch_images_inputs,
                         indexes=indexes,
-                        cond=text,
+                        cond=None,
                         prob_focus_present=prob_focus_present,
                         focus_present_mask=focus_present_mask
                     )
@@ -1027,7 +1031,7 @@ class Trainer(object):
                     if self.accelerator.sync_gradients:
                         grad_norm = self.accelerator.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
                         avg_loss = self.accelerator.gather(loss.repeat(self.batch_size)).mean()
-                        print(f'{self.step}: {avg_loss},  {grad_norm}')
+                        print(f'{self.step}: {avg_loss},  {grad_norm}', flush=True)
 
                 self.opt.step()
                 self.opt.zero_grad()
@@ -1039,24 +1043,25 @@ class Trainer(object):
                     with torch.no_grad():
                         if self.step != 0 and self.step % (self.save_and_sample_every) == 0:
                             milestone = self.step // self.save_and_sample_every
-
                             self.save(milestone)
-                            file_name = data['text_meta_dict']['filename_or_obj'][0].split('/')[-1]
 
-                            num_samples = self.num_sample_rows ** 2
-                            batches = num_to_groups(num_samples, self.batch_size)
-                            all_videos_list = list(
-                                map(lambda n: self.ema_model.module.sample(batch_size=n, cond=text), batches))
-                            all_videos_list = torch.cat(all_videos_list, dim=0)
-                            all_videos_list, all_videos_list_lobe, all_videos_list_airway, all_videos_list_vessel = all_videos_list.chunk(4, dim=1)
-                            all_videos_list = torch.cat([all_videos_list, all_videos_list_lobe, all_videos_list_airway, all_videos_list_vessel], dim=0)
+                            # file_name = data['text_meta_dict']['filename_or_obj'][0].split('/')[-1]
 
-                            all_videos_list = F.pad(all_videos_list, (2, 2, 2, 2))
+                            # num_samples = self.num_sample_rows ** 2
+                            # batches = num_to_groups(num_samples, self.batch_size)
+                            # all_videos_list = list(
+                            #     map(lambda n: self.ema_model.module.sample(batch_size=n, cond=None), batches)
+                            # )
+                            # all_videos_list = torch.cat(all_videos_list, dim=0)
+                            # all_videos_list, all_videos_list_lobe, all_videos_list_airway, all_videos_list_vessel = all_videos_list.chunk(4, dim=1)
+                            # all_videos_list = torch.cat([all_videos_list, all_videos_list_lobe, all_videos_list_airway, all_videos_list_vessel], dim=0)
 
-                            one_gif = rearrange(all_videos_list, '(i j) c f h w -> c f (i h) (j w)',
-                                                i=self.num_sample_rows)
-                            video_path = str(self.results_folder / str(f'{str(milestone)}_{file_name}.gif'))
-                            video_tensor_to_gif(one_gif, video_path)
+                            # all_videos_list = F.pad(all_videos_list, (2, 2, 2, 2))
+
+                            # one_gif = rearrange(all_videos_list, '(i j) c f h w -> c f (i h) (j w)',
+                            #                     i=self.num_sample_rows)
+                            # video_path = str(self.results_folder / str(f'{str(milestone)}_{file_name}.gif'))
+                            # video_tensor_to_gif(one_gif, video_path)
 
                         self.step += 1
 
@@ -1117,7 +1122,7 @@ if __name__ == '__main__':
         dataset_seed=args.dataset_seed,
         dataset_test_flag=False,
         ema_decay=0.999,
-        train_batch_size=1,
+        train_batch_size=4,
         train_lr=1e-4,
         train_num_steps=1000000,
         gradient_accumulate_every=4,
