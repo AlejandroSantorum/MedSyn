@@ -1,0 +1,14 @@
+*.DS_Store
+__pycache__
+.vscode
+venv*
+
+data/
+
+*.nii
+*.nii.gz
+
+*.out
+*.log
+
+*.cache
