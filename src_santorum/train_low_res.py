@@ -4,6 +4,7 @@ import copy
 import torch
 import random
 import numpy as np
+import matplotlib.pyplot as plt
 from torch import nn, einsum
 import torch.nn.functional as F
 from functools import partial
@@ -30,48 +31,6 @@ def set_seed(seed):
     np.random.seed(seed)
     torch.manual_seed(seed)
 
-# relative positional bias
-
-class RelativePositionBias(nn.Module):
-    def __init__(
-            self,
-            heads=8,
-            num_buckets=16,
-            max_distance=128
-    ):
-        super().__init__()
-        self.num_buckets = num_buckets
-        self.max_distance = max_distance
-        self.relative_attention_bias = nn.Embedding(num_buckets, heads)
-
-    @staticmethod
-    def _relative_position_bucket(relative_position, num_buckets=32, max_distance=128):
-        ret = 0
-        n = -relative_position
-
-        num_buckets //= 2
-        ret += (n < 0).long() * num_buckets
-        n = torch.abs(n)
-
-        max_exact = num_buckets // 2
-        is_small = n < max_exact
-
-        val_if_large = max_exact + (
-                torch.log(n.float() / max_exact) / math.log(max_distance / max_exact) * (num_buckets - max_exact)
-        ).long()
-        val_if_large = torch.min(val_if_large, torch.full_like(val_if_large, num_buckets - 1))
-
-        ret += torch.where(is_small, n, val_if_large)
-        return ret
-
-    def forward(self, n, device):
-        q_pos = torch.arange(n, dtype=torch.long, device=device)
-        k_pos = torch.arange(n, dtype=torch.long, device=device)
-        rel_pos = rearrange(k_pos, 'j -> 1 j') - rearrange(q_pos, 'i -> i 1')
-        rp_bucket = self._relative_position_bucket(rel_pos, num_buckets=self.num_buckets,
-                                                   max_distance=self.max_distance)
-        values = self.relative_attention_bias(rp_bucket)
-        return rearrange(values, 'i j h -> h i j')
 
 
 # small helper modules
@@ -408,8 +367,6 @@ class Unet3D(nn.Module):
         dim_mults=(1, 2, 4, 8),
         channels=3,
         attn_heads=8,
-        attn_dim_head=32,
-        total_slices=256,
         use_bert_text_cond=False,
         init_dim=None,
         init_kernel_size=7,
@@ -527,15 +484,11 @@ class Unet3D(nn.Module):
         return [logits, null_logits]
 
     def forward(
-            self,
-            x,
-            time,
-            indexes=None,
-            cond=None,
-            null_cond_prob=0.1,
-            focus_present_mask=None,
-            prob_focus_present=0.
-            # probability at which a given batch sample will focus on the present (0. is all off, 1. is completely arrested attention across time)
+        self,
+        x,
+        time,
+        cond=None,
+        null_cond_prob=0.1,
     ):
         assert not (self.has_cond and not exists(cond)), 'cond must be passed in if cond_dim specified'
 
@@ -652,7 +605,7 @@ class GaussianDiffusion(nn.Module):
 
     def p_mean_variance(self, x, t, clip_denoised: bool, indexes=None, cond=None, cond_scale=1.):
 
-        x_recon = self.denoise_fn.forward_with_cond_scale(x, t, indexes=indexes, cond=cond, cond_scale=cond_scale)
+        x_recon = self.denoise_fn.forward_with_cond_scale(x, t, cond=cond, cond_scale=cond_scale)
         if clip_denoised:
             s = 1.
             if self.use_dynamic_thres:
@@ -687,10 +640,10 @@ class GaussianDiffusion(nn.Module):
         return model_mean + nonzero_mask * (model_variance**0.5) * noise
 
     @torch.inference_mode()
-    def p_sample_ddim(self, x, t, t_minus, indexes=None, cond=None, cond_scale=1., clip_denoised=True):
+    def p_sample_ddim(self, x, t, t_minus, cond=None, cond_scale=1., clip_denoised=True):
         b, *_, device = *x.shape, x.device
 
-        x_recon = self.denoise_fn.forward_with_cond_scale(x, t, indexes=indexes, cond=cond, cond_scale=cond_scale)
+        x_recon = self.denoise_fn.forward_with_cond_scale(x, t, cond=cond, cond_scale=cond_scale)
         if cond_scale != 1:
             x_recon, x_recon_null = x_recon
             eps = get_eps_x_t(x_recon, x, t)
@@ -749,16 +702,19 @@ class GaussianDiffusion(nn.Module):
         return unnormalize_img(img)
 
     @torch.inference_mode()
-    def sample(self, cond=None, cond_scale=1., batch_size=16, DDIM=True):
-
+    def sample(self, cond=None, cond_scale=1., batch_size=16, to_use_ddim=True):
         batch_size = cond.shape[0] if exists(cond) else batch_size
         image_size = self.image_size
         channels = self.channels
         num_frames = self.num_frames
-        return self.p_sample_loop((batch_size, channels, num_frames, image_size, image_size), cond=cond,
-                                      cond_scale=cond_scale, use_ddim=DDIM)
+        return self.p_sample_loop(
+            (batch_size, channels, num_frames, image_size, image_size),
+            cond=cond,
+            cond_scale=cond_scale,
+            use_ddim=to_use_ddim,
+        )
 
-    def p_losses(self, x_start, t, indexes=None, cond=None, **kwargs):
+    def p_losses(self, x_start, t, cond=None, **kwargs):
         b, c, f, h, w, device = *x_start.shape, x_start.device
 
         x_noisy, noise = get_z_t(x_start, t)
@@ -766,9 +722,44 @@ class GaussianDiffusion(nn.Module):
         if is_list_str(cond):
             cond = cond.to(device)
 
-        x_recon = self.denoise_fn(x_noisy, t*self.num_timesteps, indexes=indexes, cond=cond, **kwargs)
+        x_recon = self.denoise_fn(x_noisy, t*self.num_timesteps, cond=cond, **kwargs)
 
         loss = F.mse_loss(x_start, x_recon)
+
+        ####################################################
+        # TODO: REMOVE THIS
+
+        print("x_start shape: ", x_start.shape)
+        print("x_start min and max: ", x_start.min(), x_start.max())
+        print("x_noisy shape: ", x_noisy.shape)
+        print("x_noisy min and max: ", x_noisy.min(), x_noisy.max())
+        print("noise shape: ", noise.shape)
+        print("noise min and max: ", noise.min(), noise.max())
+
+        sample_x_start_slice = x_start[0, 0, :, :, 32]
+        assert sample_x_start_slice.shape == (f, h), f'sample x_start slice shape {sample_x_start_slice.shape} does not match expected shape {(f, h)}'
+        plt.imsave(
+            "/scratch/santorum/checkpoints/bratsc2023-mni-64x64x64/sample_x_start_slice.png",
+            sample_x_start_slice.cpu().numpy(),
+            cmap='gray'
+        )
+
+        sample_x_noisy_slice = x_noisy[0, 0, :, :, 32]
+        assert sample_x_noisy_slice.shape == (f, h), f'sample x_noisy slice shape {sample_x_noisy_slice.shape} does not match expected shape {(f, h)}'
+        plt.imsave(
+            "/scratch/santorum/checkpoints/bratsc2023-mni-64x64x64/sample_x_noisy_slice.png",
+            sample_x_noisy_slice.cpu().numpy(),
+            cmap='gray'
+        )
+
+        sample_x_recon_slice = x_recon[0, 0, :, :, 32]
+        assert sample_x_recon_slice.shape == (f, h), f'sample x_recon slice shape {sample_x_recon_slice.shape} does not match expected shape {(f, h)}'
+        plt.imsave(
+            "/scratch/santorum/checkpoints/bratsc2023-mni-64x64x64/sample_x_recon_slice.png",
+            sample_x_recon_slice.detach().cpu().numpy(),
+            cmap='gray'
+        )
+        ####################################################
 
         return loss
 
@@ -803,22 +794,6 @@ def seek_all_images(img, channels=3):
             break
         i += 1
 
-
-# tensor of shape (channels, frames, height, width) -> gif
-
-def video_tensor_to_gif(tensor, path, duration=120, loop=0, optimize=True):
-    images = map(T.ToPILImage(), tensor.unbind(dim=1))
-    first_img, *rest_imgs = images
-    first_img.save(path, save_all=True, append_images=rest_imgs, duration=duration, loop=loop, optimize=optimize)
-    return images
-
-
-# gif -> (channels, frame, height, width) tensor
-
-# def gif_to_tensor(path, channels=3, transform=T.ToTensor()):
-#     img = Image.open(path)
-#     tensors = tuple(map(transform, seek_all_images(img, channels=channels)))
-#     return torch.stack(tensors, dim=1)
 
 
 def identity(t, *args, **kwargs):
@@ -914,7 +889,7 @@ class Trainer(object):
         amp=False,
         step_start_ema=2000,
         update_ema_every=10,
-        save_and_sample_every=1000,
+        save_and_sample_every=5000,
         results_folder='./results',
         num_sample_rows=4,
         max_grad_norm=None
@@ -997,14 +972,7 @@ class Trainer(object):
 
         self.accelerator.load_state(os.path.join(self.results_folder, path), strict=False)
 
-    def train(
-            self,
-            prob_focus_present=0.,
-            focus_present_mask=None,
-            log_fn=noop
-    ):
-        assert callable(log_fn)
-
+    def train(self):
         while self.step < self.train_num_steps:
             for i in range(self.gradient_accumulate_every):
                 with self.accelerator.accumulate(self.model):
@@ -1014,17 +982,18 @@ class Trainer(object):
                     # text = text.to(self.accelerator.device)
                     B, C, D, H, W = img.shape
 
-                    batch_images_inputs = img
-                    indexes = torch.arange(0,self.num_frames).unsqueeze(0)
-                    indexes = torch.cat([indexes]*B, dim=0).to(self.accelerator.device)
-
-                    loss = self.model(
-                        batch_images_inputs,
-                        indexes=indexes,
-                        cond=None,
-                        prob_focus_present=prob_focus_present,
-                        focus_present_mask=focus_present_mask
+                    #######################################
+                    # TODO: REMOVE
+                    sample_slice = img[0, 0, :, :, 32]
+                    assert sample_slice.shape == (D, H), f"sample slice shape {sample_slice.shape} does not match expected shape {(D, H)}"
+                    plt.imsave(
+                        os.path.join(self.results_folder, f"{self.step}_sample_slice.png"),
+                        sample_slice.cpu().numpy(),
+                        cmap="gray",
                     )
+                    #######################################
+
+                    loss = self.model(img, cond=None)
                     self.accelerator.backward(loss)
 
                     if self.accelerator.sync_gradients:
@@ -1044,23 +1013,18 @@ class Trainer(object):
                             milestone = self.step // self.save_and_sample_every
                             self.save(milestone)
 
-                            # file_name = data['text_meta_dict']['filename_or_obj'][0].split('/')[-1]
-
-                            # num_samples = self.num_sample_rows ** 2
-                            # batches = num_to_groups(num_samples, self.batch_size)
-                            # all_videos_list = list(
-                            #     map(lambda n: self.ema_model.module.sample(batch_size=n, cond=None), batches)
-                            # )
-                            # all_videos_list = torch.cat(all_videos_list, dim=0)
-                            # all_videos_list, all_videos_list_lobe, all_videos_list_airway, all_videos_list_vessel = all_videos_list.chunk(4, dim=1)
-                            # all_videos_list = torch.cat([all_videos_list, all_videos_list_lobe, all_videos_list_airway, all_videos_list_vessel], dim=0)
-
-                            # all_videos_list = F.pad(all_videos_list, (2, 2, 2, 2))
-
-                            # one_gif = rearrange(all_videos_list, '(i j) c f h w -> c f (i h) (j w)',
-                            #                     i=self.num_sample_rows)
-                            # video_path = str(self.results_folder / str(f'{str(milestone)}_{file_name}.gif'))
-                            # video_tensor_to_gif(one_gif, video_path)
+                            # sample and save
+                            for sample_idx in range(self.num_sample_rows):
+                                # sample
+                                sampled_imgs = self.ema_model.sample(batch_size=1, cond=None)
+                                # remove batch and channel dimensions
+                                sampled_img = sampled_imgs[0].squeeze(dim=0).cpu().numpy()
+                                # get 2d sample image
+                                plt.imshow(sampled_img[:,:,32], cmap="gray")
+                                plt.axis("off")
+                                # save sample
+                                plt.savefig(str(self.results_folder / f"{self.step}_{sample_idx}.png"))
+                                plt.close()
 
                         self.step += 1
 
@@ -1091,8 +1055,6 @@ if __name__ == '__main__':
         dim_mults=(1, 2, 4, 8),
         channels=1, # 4, # originally 4 channels
         attn_heads=8,
-        attn_dim_head=32,
-        # use_bert_text_cond=False,  # used for BERT text conditioning
         init_dim=None,
         init_kernel_size=7,
         use_sparse_linear_attn=True,
