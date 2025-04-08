@@ -1,6 +1,7 @@
 import argparse
 import copy
 
+import matplotlib.pyplot as plt
 import numpy as np
 from torch.utils import data
 from pathlib import Path
@@ -93,6 +94,29 @@ class Evaluator(object):
         self.accelerator.load_state(self.model_path, strict=False)
 
     def eval(self):
+        for i in range(self.num_eval_samples):
+            # sample from the model
+            sampled_imgs = self.ema_model.sample(batch_size=1, cond=None)
+            sampled_img = sampled_imgs[0].squeeze(dim=0).cpu().numpy()  # remove batch and channel dimensions
+            plt.imshow(sampled_img[:,:,32], cmap="gray")
+            plt.axis("off")
+            plt.savefig(os.path.join(self.save_folder, f"sample_{i}.png"))
+            plt.close()
+
+            print(f"Sampled image shape {sampled_img.shape}", flush=True)
+            print(f"Min value: {sampled_img.min()}, Max value: {sampled_img.max()}", flush=True)
+
+
+            # file_name = f"sample_{i}.nii.gz"
+            # nifti_img_path = os.path.join(self.save_folder, file_name)
+            # sampled_img = sampled_img.squeeze(0)  # remove batch dimension
+            # # store 3D image as nifti
+            # img = nib.Nifti1Image(sampled_img.cpu().numpy(), affine=np.eye(4))
+            # nib.save(img, nifti_img_path)
+            # print(f"Saved {nifti_img_path} (size {sampled_img.shape})")
+
+
+    def eval_in_batches(self):
         # get the number of samples in batches
         batches = num_to_groups(self.num_eval_samples, self.batch_size)
 
