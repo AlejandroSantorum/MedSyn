@@ -729,36 +729,36 @@ class GaussianDiffusion(nn.Module):
         ####################################################
         # TODO: REMOVE THIS
 
-        print("x_start shape: ", x_start.shape)
-        print("x_start min and max: ", x_start.min(), x_start.max())
-        print("x_noisy shape: ", x_noisy.shape)
-        print("x_noisy min and max: ", x_noisy.min(), x_noisy.max())
-        print("noise shape: ", noise.shape)
-        print("noise min and max: ", noise.min(), noise.max())
+        # print("x_start shape: ", x_start.shape)
+        # print("x_start min and max: ", x_start.min(), x_start.max())
+        # print("x_noisy shape: ", x_noisy.shape)
+        # print("x_noisy min and max: ", x_noisy.min(), x_noisy.max())
+        # print("noise shape: ", noise.shape)
+        # print("noise min and max: ", noise.min(), noise.max())
 
-        sample_x_start_slice = x_start[0, 0, :, :, 32]
-        assert sample_x_start_slice.shape == (f, h), f'sample x_start slice shape {sample_x_start_slice.shape} does not match expected shape {(f, h)}'
-        plt.imsave(
-            "/scratch/santorum/checkpoints/bratsc2023-mni-64x64x64/sample_x_start_slice.png",
-            sample_x_start_slice.cpu().numpy(),
-            cmap='gray'
-        )
+        # sample_x_start_slice = x_start[0, 0, :, :, 32]
+        # assert sample_x_start_slice.shape == (f, h), f'sample x_start slice shape {sample_x_start_slice.shape} does not match expected shape {(f, h)}'
+        # plt.imsave(
+        #     "/scratch/santorum/checkpoints/bratsc2023-mni-64x64x64/sample_x_start_slice.png",
+        #     sample_x_start_slice.cpu().numpy(),
+        #     cmap='gray'
+        # )
 
-        sample_x_noisy_slice = x_noisy[0, 0, :, :, 32]
-        assert sample_x_noisy_slice.shape == (f, h), f'sample x_noisy slice shape {sample_x_noisy_slice.shape} does not match expected shape {(f, h)}'
-        plt.imsave(
-            "/scratch/santorum/checkpoints/bratsc2023-mni-64x64x64/sample_x_noisy_slice.png",
-            sample_x_noisy_slice.cpu().numpy(),
-            cmap='gray'
-        )
+        # sample_x_noisy_slice = x_noisy[0, 0, :, :, 32]
+        # assert sample_x_noisy_slice.shape == (f, h), f'sample x_noisy slice shape {sample_x_noisy_slice.shape} does not match expected shape {(f, h)}'
+        # plt.imsave(
+        #     "/scratch/santorum/checkpoints/bratsc2023-mni-64x64x64/sample_x_noisy_slice.png",
+        #     sample_x_noisy_slice.cpu().numpy(),
+        #     cmap='gray'
+        # )
 
-        sample_x_recon_slice = x_recon[0, 0, :, :, 32]
-        assert sample_x_recon_slice.shape == (f, h), f'sample x_recon slice shape {sample_x_recon_slice.shape} does not match expected shape {(f, h)}'
-        plt.imsave(
-            "/scratch/santorum/checkpoints/bratsc2023-mni-64x64x64/sample_x_recon_slice.png",
-            sample_x_recon_slice.detach().cpu().numpy(),
-            cmap='gray'
-        )
+        # sample_x_recon_slice = x_recon[0, 0, :, :, 32]
+        # assert sample_x_recon_slice.shape == (f, h), f'sample x_recon slice shape {sample_x_recon_slice.shape} does not match expected shape {(f, h)}'
+        # plt.imsave(
+        #     "/scratch/santorum/checkpoints/bratsc2023-mni-64x64x64/sample_x_recon_slice.png",
+        #     sample_x_recon_slice.detach().cpu().numpy(),
+        #     cmap='gray'
+        # )
         ####################################################
 
         return loss
@@ -977,6 +977,8 @@ class Trainer(object):
             for i in range(self.gradient_accumulate_every):
                 with self.accelerator.accumulate(self.model):
                     data = next(self.dl)
+                    # new: normalize between 0 and 1
+                    data = data / 255.0
                     img = data  # , text = data["image"], data["text"]
                     img = img.to(self.accelerator.device) # img.to(self.accelerator.device).squeeze(dim=1)
                     # text = text.to(self.accelerator.device)
@@ -984,13 +986,13 @@ class Trainer(object):
 
                     #######################################
                     # TODO: REMOVE
-                    sample_slice = img[0, 0, :, :, 32]
-                    assert sample_slice.shape == (D, H), f"sample slice shape {sample_slice.shape} does not match expected shape {(D, H)}"
-                    plt.imsave(
-                        os.path.join(self.results_folder, f"{self.step}_sample_slice.png"),
-                        sample_slice.cpu().numpy(),
-                        cmap="gray",
-                    )
+                    # sample_slice = img[0, 0, :, :, 32]
+                    # assert sample_slice.shape == (D, H), f"sample slice shape {sample_slice.shape} does not match expected shape {(D, H)}"
+                    # plt.imsave(
+                    #     os.path.join(self.results_folder, f"{self.step}_sample_slice.png"),
+                    #     sample_slice.cpu().numpy(),
+                    #     cmap="gray",
+                    # )
                     #######################################
 
                     loss = self.model(img, cond=None)
@@ -1089,7 +1091,7 @@ if __name__ == '__main__':
         amp=True,
         step_start_ema=10000,
         update_ema_every=1,
-        save_and_sample_every=1000,
+        save_and_sample_every=5000,
         results_folder=args.save_dir,
         num_sample_rows=1,
         max_grad_norm=1.0,
