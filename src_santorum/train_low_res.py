@@ -603,7 +603,7 @@ class GaussianDiffusion(nn.Module):
         self.use_dynamic_thres = use_dynamic_thres
         self.dynamic_thres_percentile = dynamic_thres_percentile
 
-    def p_mean_variance(self, x, t, clip_denoised: bool, indexes=None, cond=None, cond_scale=1.):
+    def p_mean_variance(self, x, t, clip_denoised: bool, cond=None, cond_scale=1.):
 
         x_recon = self.denoise_fn.forward_with_cond_scale(x, t, cond=cond, cond_scale=cond_scale)
         if clip_denoised:
@@ -628,12 +628,12 @@ class GaussianDiffusion(nn.Module):
 
 
     @torch.inference_mode()
-    def p_sample(self, x, t, indexes=None, cond=None, cond_scale=1., clip_denoised=True):
+    def p_sample(self, x, t, cond=None, cond_scale=1., clip_denoised=True):
         b, *_, device = *x.shape, x.device
 
-        model_mean, model_variance = self.p_mean_variance(x=x, t=t, indexes=indexes, clip_denoised=clip_denoised,
-                                                                 cond=cond,
-                                                                 cond_scale=cond_scale)
+        model_mean, model_variance = self.p_mean_variance(
+            x=x, t=t, clip_denoised=clip_denoised, cond=cond, cond_scale=cond_scale
+        )
         noise = torch.randn_like(x)
         # no noise when t == 0
         nonzero_mask = (1 - (t == 0).float()).reshape(b, 1, self.num_frames, 1, 1)
@@ -683,22 +683,15 @@ class GaussianDiffusion(nn.Module):
             time_steps = range(0, self.num_timesteps)
 
         img = torch.randn(shape, device=device)
-        indexes = []
-        for b in range(bsz):
-            index = np.arange(self.num_frames)
-            indexes.append(torch.from_numpy(index))
-        indexes = torch.stack(indexes, dim=0).long().to(device)
         for i, t in enumerate(tqdm(reversed(time_steps), desc='sampling loop time step',
                                    total=len(time_steps))):
             time = torch.full((bsz,), t, device=device, dtype=torch.float32)
 
             if use_ddim:
                 time_minus = time - int(self.num_timesteps / self.ddim_timesteps)
-                img = self.p_sample_ddim(img, time, time_minus, indexes=indexes, cond=cond,
-                                         cond_scale=cond_scale)
+                img = self.p_sample_ddim(img, time, time_minus, cond=cond, cond_scale=cond_scale)
             else:
-                img = self.p_sample(img, time, indexes=indexes, cond=cond,
-                                    cond_scale=cond_scale)
+                img = self.p_sample(img, time, cond=cond, cond_scale=cond_scale)
         return unnormalize_img(img)
 
     @torch.inference_mode()
@@ -1019,14 +1012,13 @@ class Trainer(object):
                             for sample_idx in range(self.num_sample_rows):
                                 # sample
                                 sampled_imgs = self.ema_model.sample(batch_size=1, cond=None)
-                                # remove batch and channel dimensions
-                                sampled_img = sampled_imgs[0].squeeze(dim=0).cpu().numpy()
-                                # get 2d sample image
-                                plt.imshow(sampled_img[:,:,32], cmap="gray")
-                                plt.axis("off")
-                                # save sample
-                                plt.savefig(str(self.results_folder / f"{self.step}_{sample_idx}.png"))
-                                plt.close()
+                                # remove batch and channel dimensions and get 2D slice
+                                sample_img = sampled_imgs[sample_idx, 0, : :, 32]
+                                plt.imsave(
+                                    os.path.join(self.results_folder, f"sample_step{self.step}_idx{sample_idx}.png"),
+                                    sample_img.cpu().numpy(),
+                                    cmap="gray",
+                                )
 
                         self.step += 1
 
