@@ -718,6 +718,7 @@ class GaussianDiffusion(nn.Module):
         x_recon = self.denoise_fn(x_noisy, t*self.num_timesteps, cond=cond, **kwargs)
 
         loss = F.mse_loss(x_start, x_recon)
+        # IDEA: Use normalized cross-correlation (NCC) as loss function: https://github.com/voxelmorph/voxelmorph/blob/dev/voxelmorph/torch/losses.py
 
         ####################################################
         # TODO: REMOVE THIS
@@ -951,8 +952,9 @@ class Trainer(object):
             return
         self.ema.update_model_average(self.ema_model, self.model)
 
-    def save(self, milestone):
-        self.accelerator.save_state(str(self.results_folder / f'{milestone}_ckpt'))
+    def save(self):
+        num_visible_devices = torch.cuda.device_count()
+        self.accelerator.save_state(str(self.results_folder / f'{num_visible_devices}gpus_{self.step}_ckpt'))
 
     def load(self, milestone, **kwargs):
         if milestone == -1:
@@ -1006,7 +1008,7 @@ class Trainer(object):
                     with torch.no_grad():
                         if self.step != 0 and self.step % (self.save_and_sample_every) == 0:
                             milestone = self.step // self.save_and_sample_every
-                            self.save(milestone)
+                            self.save()
 
                             # sample and save
                             for sample_idx in range(self.num_sample_rows):
