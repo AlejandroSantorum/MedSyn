@@ -1050,7 +1050,6 @@ if __name__ == '__main__':
         # cond_dim=768,  # used for BERT text conditioning
         dim_mults=(1, 2, 4, 8),
         channels=1, # 4, # originally 4 channels
-        attn_heads=8,
         init_dim=None,
         init_kernel_size=7,
         use_sparse_linear_attn=True,

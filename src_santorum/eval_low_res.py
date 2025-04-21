@@ -97,15 +97,26 @@ class Evaluator(object):
         for i in range(self.num_eval_samples):
             # sample from the model
             sampled_imgs = self.ema_model.sample(batch_size=1, cond=None)
-            sampled_img = sampled_imgs[0].squeeze(dim=0).cpu().numpy()  # remove batch and channel dimensions
-            plt.imshow(sampled_img[:,:,32], cmap="gray")
+
+            file_name = f"sample_{i}.nii.gz"
+            nifti_img_path = os.path.join(self.save_folder, file_name)
+
+            sample_img = sampled_imgs[0].squeeze(0).cpu().numpy()  # remove batch and channel dimension
+
+            # store 3D image as nifti
+            img = nib.Nifti1Image(sample_img, affine=np.eye(4))
+            nib.save(img, nifti_img_path)
+            print(f"Saved {nifti_img_path} (size {sample_img.shape})")
+
+            # save sample slice as png
+            sampled_slice_img = sample_img[:,:,32]  # choose slice index 32
+            plt.imshow(sampled_slice_img, cmap="gray")
             plt.axis("off")
             plt.savefig(os.path.join(self.save_folder, f"sample_{i}.png"))
             plt.close()
 
-            print(f"Sampled image shape {sampled_img.shape}", flush=True)
-            print(f"Min value: {sampled_img.min()}, Max value: {sampled_img.max()}", flush=True)
-
+            print(f"Sampled image shape {sampled_slice_img.shape}", flush=True)
+            print(f"Min value: {sampled_slice_img.min()}, Max value: {sampled_slice_img.max()}", flush=True)
 
             # file_name = f"sample_{i}.nii.gz"
             # nifti_img_path = os.path.join(self.save_folder, file_name)
@@ -143,8 +154,6 @@ def main(args):
         # cond_dim=768,  # used for BERT text conditioning
         dim_mults=(1, 2, 4, 8),
         channels=1, # 4, # originally 4 channels
-        attn_heads=8,
-        attn_dim_head=32,
         # use_bert_text_cond=False,  # used for BERT text conditioning
         init_dim=None,
         init_kernel_size=7,
