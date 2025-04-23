@@ -26,11 +26,88 @@ from utils import *
 
 import argparse
 
+
+# Functions added by A. Santorum
+
 def set_seed(seed):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
 
+
+def ncc_loss(y_true, y_pred, win=None):
+    """
+    Compute the normalized cross-correlation (NCC) loss between two tensors.
+
+    Args:
+        y_true (torch.Tensor): The ground truth tensor.
+        y_pred (torch.Tensor): The predicted tensor.
+        win (list, optional): The size of the window for NCC computation. Defaults to None.
+    
+    Returns:
+        torch.Tensor: The NCC loss value.
+    """
+    Ii = y_true
+    Ji = y_pred
+
+    # get dimension of volume
+    # assumes Ii, Ji are sized [batch_size, *vol_shape, nb_feats]
+    ndims = len(list(Ii.size())) - 2
+    assert ndims in [1, 2, 3], "volumes should be 1 to 3 dimensions. found: %d" % ndims
+
+    # set window size
+    win = [9] * ndims if win is None else win
+
+    # compute filters
+    sum_filt = torch.ones([1, 1, *win]).to("cuda")
+
+    pad_no = math.floor(win[0] / 2)
+
+    if ndims == 1:
+        stride = (1)
+        padding = (pad_no)
+    elif ndims == 2:
+        stride = (1, 1)
+        padding = (pad_no, pad_no)
+    else:
+        stride = (1, 1, 1)
+        padding = (pad_no, pad_no, pad_no)
+
+    # get convolution function
+    conv_fn = getattr(F, 'conv%dd' % ndims)
+
+    # compute CC squares
+    I2 = Ii * Ii
+    J2 = Ji * Ji
+    IJ = Ii * Ji
+
+    I_sum = conv_fn(Ii, sum_filt, stride=stride, padding=padding)
+    J_sum = conv_fn(Ji, sum_filt, stride=stride, padding=padding)
+    I2_sum = conv_fn(I2, sum_filt, stride=stride, padding=padding)
+    J2_sum = conv_fn(J2, sum_filt, stride=stride, padding=padding)
+    IJ_sum = conv_fn(IJ, sum_filt, stride=stride, padding=padding)
+
+    win_size = np.prod(win)
+    u_I = I_sum / win_size
+    u_J = J_sum / win_size
+
+    cross = IJ_sum - u_J * I_sum - u_I * J_sum + u_I * u_J * win_size
+    I_var = I2_sum - 2 * u_I * I_sum + u_I * u_I * win_size
+    J_var = J2_sum - 2 * u_J * J_sum + u_J * u_J * win_size
+
+    # clamp variance to avoid division by zero (or really small values)
+    epsilon = 1e-6
+    I_var = torch.clamp(I_var, min=epsilon)
+    J_var = torch.clamp(J_var, min=epsilon)
+
+    # compute normalized cross-correlation
+    cc = cross * cross / (I_var * J_var + 1e-5)
+
+    # replace nan's with 0's
+    cc = torch.nan_to_num(cc, nan=0.0)
+
+    # compute NCC loss
+    return -torch.mean(cc)
 
 
 # small helper modules
@@ -576,7 +653,7 @@ class GaussianDiffusion(nn.Module):
         text_use_bert_cls=False,
         channels=3,
         timesteps=1000,
-        loss_type='l1',
+        loss_type='l2',
         use_dynamic_thres=False,  # from the Imagen paper
         dynamic_thres_percentile=0.9,
         # volume_depth=128,  # not used
@@ -717,43 +794,13 @@ class GaussianDiffusion(nn.Module):
 
         x_recon = self.denoise_fn(x_noisy, t*self.num_timesteps, cond=cond, **kwargs)
 
-        loss = F.mse_loss(x_start, x_recon)
-        # IDEA: Use normalized cross-correlation (NCC) as loss function: https://github.com/voxelmorph/voxelmorph/blob/dev/voxelmorph/torch/losses.py
-
-        ####################################################
-        # TODO: REMOVE THIS
-
-        # print("x_start shape: ", x_start.shape)
-        # print("x_start min and max: ", x_start.min(), x_start.max())
-        # print("x_noisy shape: ", x_noisy.shape)
-        # print("x_noisy min and max: ", x_noisy.min(), x_noisy.max())
-        # print("noise shape: ", noise.shape)
-        # print("noise min and max: ", noise.min(), noise.max())
-
-        # sample_x_start_slice = x_start[0, 0, :, :, 32]
-        # assert sample_x_start_slice.shape == (f, h), f'sample x_start slice shape {sample_x_start_slice.shape} does not match expected shape {(f, h)}'
-        # plt.imsave(
-        #     "/scratch/santorum/checkpoints/bratsc2023-mni-64x64x64/sample_x_start_slice.png",
-        #     sample_x_start_slice.cpu().numpy(),
-        #     cmap='gray'
-        # )
-
-        # sample_x_noisy_slice = x_noisy[0, 0, :, :, 32]
-        # assert sample_x_noisy_slice.shape == (f, h), f'sample x_noisy slice shape {sample_x_noisy_slice.shape} does not match expected shape {(f, h)}'
-        # plt.imsave(
-        #     "/scratch/santorum/checkpoints/bratsc2023-mni-64x64x64/sample_x_noisy_slice.png",
-        #     sample_x_noisy_slice.cpu().numpy(),
-        #     cmap='gray'
-        # )
-
-        # sample_x_recon_slice = x_recon[0, 0, :, :, 32]
-        # assert sample_x_recon_slice.shape == (f, h), f'sample x_recon slice shape {sample_x_recon_slice.shape} does not match expected shape {(f, h)}'
-        # plt.imsave(
-        #     "/scratch/santorum/checkpoints/bratsc2023-mni-64x64x64/sample_x_recon_slice.png",
-        #     sample_x_recon_slice.detach().cpu().numpy(),
-        #     cmap='gray'
-        # )
-        ####################################################
+        if self.loss_type == 'l2':
+            loss = F.mse_loss(x_start, x_recon)
+        elif self.loss_type == 'ncc':
+            # IDEA: Use normalized cross-correlation (NCC) as loss function: https://github.com/voxelmorph/voxelmorph/blob/dev/voxelmorph/torch/losses.py
+            loss = ncc_loss(x_start, x_recon)
+        else:
+            raise ValueError(f'Unknown loss type {self.loss_type}')
 
         return loss
 
@@ -979,17 +1026,6 @@ class Trainer(object):
                     # text = text.to(self.accelerator.device)
                     B, C, D, H, W = img.shape
 
-                    #######################################
-                    # TODO: REMOVE
-                    # sample_slice = img[0, 0, :, :, 32]
-                    # assert sample_slice.shape == (D, H), f"sample slice shape {sample_slice.shape} does not match expected shape {(D, H)}"
-                    # plt.imsave(
-                    #     os.path.join(self.results_folder, f"{self.step}_sample_slice.png"),
-                    #     sample_slice.cpu().numpy(),
-                    #     cmap="gray",
-                    # )
-                    #######################################
-
                     loss = self.model(img, cond=None)
                     self.accelerator.backward(loss)
 
@@ -1036,12 +1072,15 @@ if __name__ == '__main__':
                         help='Your Training DATA Path')
     parser.add_argument('--save_dir', type=str, default="",
                         help='Your Logs Saving Path')
+    # New arguments by A. Santorum
     parser.add_argument('--dataset_num_samples', type=int, default=1000,
                         help='Your Training DATA Number of Samples')
     parser.add_argument('--dataset_seed', type=int, default=42,
                         help='Your Training DATA Seed')
     parser.add_argument('--train_seed', type=int, default=42,
                         help='Your Training Seed')
+    parser.add_argument('--loss_type', type=str, default='l2', choices=['l2', 'ncc'],
+                        help='Loss type to use for training')
 
     args = parser.parse_args()
 
@@ -1069,6 +1108,7 @@ if __name__ == '__main__':
         dynamic_thres_percentile=0.995,
         # volume_depth=64,  # not used
         ddim_timesteps=50,
+        loss_type=args.loss_type,
     )
 
     trainer = Trainer(
@@ -1078,7 +1118,7 @@ if __name__ == '__main__':
         dataset_seed=args.dataset_seed,
         ema_decay=0.999,
         train_batch_size=4,
-        train_lr=1e-4,
+        train_lr=1e-4,  # 1e-5, 1e-6
         train_num_steps=1000000,
         gradient_accumulate_every=4,
         amp=True,
