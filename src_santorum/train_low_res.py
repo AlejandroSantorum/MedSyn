@@ -1118,7 +1118,7 @@ if __name__ == '__main__':
         dataset_seed=args.dataset_seed,
         ema_decay=0.999,
         train_batch_size=4,
-        train_lr=1e-4,  # 1e-5, 1e-6
+        train_lr=1e-4,
         train_num_steps=1000000,
         gradient_accumulate_every=4,
         amp=True,
