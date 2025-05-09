@@ -3,6 +3,7 @@ import math
 import copy
 import torch
 import random
+import argparse
 import numpy as np
 import matplotlib.pyplot as plt
 from torch import nn, einsum
@@ -12,7 +13,6 @@ from functools import partial
 from torch.utils import data
 from pathlib import Path
 from torch.optim import AdamW
-from PIL import Image
 
 from tqdm import tqdm
 from einops import rearrange
@@ -24,7 +24,6 @@ import xformers, xformers.ops
 
 from utils import *
 
-import argparse
 
 
 # Functions added by A. Santorum
@@ -1011,11 +1010,6 @@ if __name__ == '__main__':
         # cond_dim=768,  # used for BERT text conditioning
         dim_mults=(1, 2, 4, 8),
         channels=1, # 4, # originally 4 channels
-        init_dim=None,
-        init_kernel_size=7,
-        use_sparse_linear_attn=True,
-        block_type='resnet',
-        resnet_groups=8
     )
 
     # image of size (N, D, H, W) = (1, 64, 64, 64)

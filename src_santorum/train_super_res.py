@@ -1,6 +1,7 @@
-
+import os
+import argparse
 import copy
-
+import random
 import numpy as np
 from torch import nn, einsum
 import torch.nn.functional as F
@@ -11,16 +12,24 @@ from pathlib import Path
 from torch.optim import AdamW
 from torchvision import transforms as T
 from PIL import Image
+import matplotlib.pyplot as plt
 
 from tqdm import tqdm
 from einops import rearrange
 from dataloader import cache_transformed_train_data_aug_seg
-import os
-from einops_exts import rearrange_many
 
-from text import tokenize, bert_embed, BERT_MODEL_DIM
+from accelerate import Accelerator
 
 from utils import *
+
+
+# Functions added by A. Santorum
+
+def set_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
 
 # relative positional bias
 
@@ -328,10 +337,10 @@ class Attention(nn.Module):
         self.to_out = nn.Linear(hidden_dim, dim, bias=False)
 
     def forward(
-            self,
-            x,
-            pos_bias=None,
-            focus_present_mask=None
+        self,
+        x,
+        pos_bias=None,
+        focus_present_mask=None
     ):
         n, device = x.shape[-2], x.device
 
@@ -394,20 +403,18 @@ class Attention(nn.Module):
 
 class Unet3D(nn.Module):
     def __init__(
-            self,
-            dim,
-            cond_dim=None,
-            dim_mults=(1, 2, 4, 8),
-            channels=3,
-            attn_heads=8,
-            attn_dim_head=32,
-            total_slices=256,
-            use_bert_text_cond=False,
-            init_dim=None,
-            init_kernel_size=7,
-            use_sparse_linear_attn=True,
-            block_type='resnet',
-            resnet_groups=8
+        self,
+        dim,
+        cond_dim=None,
+        dim_mults=(1, 2, 4, 8),
+        channels=3,
+        attn_heads=8,
+        use_bert_text_cond=False,
+        init_dim=None,
+        init_kernel_size=7,
+        use_sparse_linear_attn=True,
+        block_type='resnet',
+        resnet_groups=8
     ):
         super().__init__()
         self.channels = channels
@@ -511,15 +518,11 @@ class Unet3D(nn.Module):
         return null_logits + (logits - null_logits) * cond_scale
 
     def forward(
-            self,
-            x,
-            time,
-            indexes=None,
-            cond=None,
-            null_cond_prob=0.,
-            focus_present_mask=None,
-            prob_focus_present=0.
-            # probability at which a given batch sample will focus on the present (0. is all off, 1. is completely arrested attention across time)
+        self,
+        x,
+        time,
+        cond=None,
+        # probability at which a given batch sample will focus on the present (0. is all off, 1. is completely arrested attention across time)
     ):
         assert not (self.has_cond and not exists(cond)), 'cond must be passed in if cond_dim specified'
 
@@ -582,19 +585,19 @@ def cosine_beta_schedule(timesteps, s=0.008):
 
 class GaussianDiffusion(nn.Module):
     def __init__(
-            self,
-            denoise_fn,
-            *,
-            image_size,
-            num_frames,
-            text_use_bert_cls=False,
-            channels=3,
-            timesteps=1000,
-            loss_type='l1',
-            use_dynamic_thres=False,  # from the Imagen paper
-            dynamic_thres_percentile=0.9,
-            volume_depth=128,
-            ddim_timesteps,
+        self,
+        denoise_fn,
+        *,
+        image_size,
+        num_frames,
+        text_use_bert_cls=False,
+        channels=3,
+        timesteps=1000,
+        loss_type='l1',
+        use_dynamic_thres=False,  # from the Imagen paper
+        dynamic_thres_percentile=0.9,
+        volume_depth=128,
+        ddim_timesteps,
     ):
         super().__init__()
         self.channels = channels
@@ -861,23 +864,25 @@ class Dataset(data.Dataset):
 
 class Trainer(object):
     def __init__(
-            self,
-            diffusion_model,
-            folder,
-            *,
-            ema_decay=0.995,
-            num_frames=16,
-            train_batch_size=32,
-            train_lr=1e-4,
-            train_num_steps=100000,
-            gradient_accumulate_every=2,
-            amp=False,
-            step_start_ema=2000,
-            update_ema_every=10,
-            save_and_sample_every=1000,
-            results_folder='./results',
-            num_sample_rows=4,
-            max_grad_norm=None
+        self,
+        diffusion_model,
+        folder,
+        *,
+        dataset_num_max_samples=1000,
+        dataset_seed=42,
+        ema_decay=0.995,
+        num_frames=16,
+        train_batch_size=32,
+        train_lr=1e-4,
+        train_num_steps=100000,
+        gradient_accumulate_every=2,
+        amp=False,
+        step_start_ema=2000,
+        update_ema_every=10,
+        save_and_sample_every=1000,
+        results_folder='./results',
+        num_sample_rows=4,
+        max_grad_norm=None
     ):
         super().__init__()
         self.model = diffusion_model
@@ -898,29 +903,40 @@ class Trainer(object):
 
         train_files = []
 
-        for img_dir in os.listdir("root of data"):
-            train_files.append({"image": os.path.join(folder, img_dir),
-                                "lobe": os.path.join(
-                                    "root of lobe seg",
-                                    img_dir),
-                                "airway": os.path.join(
-                                    "root of airway seg",
-                                    img_dir),
-                                "vessel": os.path.join(
-                                    "root of vessel seg",
-                                    img_dir),
-                                'text': os.path.join("root of text feature",
-                                                     img_dir)})
+        self.ds = Dataset(
+            folder=folder,
+            num_max_samples=dataset_num_max_samples,
+            dataset_seed=dataset_seed,
+            test_flag=False,
+        )
 
-        self.ds = cache_transformed_train_data_aug_seg(shape=[image_size, image_size, image_size], crop_shape=[image_size, 72, 72],
-                                               train_files=train_files)
-
-        self.ds_eval = cache_transformed_train_data_aug_seg(shape=[image_size, image_size, image_size],
-                                                   crop_shape=[image_size, 128, 128],
-                                                   train_files=train_files)
-
-        print(f'found {len(self.ds)} videos as gif files at {folder}')
+        print(f'Found {len(self.ds)} 3D images at {folder}')
         assert len(self.ds) > 0, 'need to have at least 1 video to start training (although 1 is not great, try 100k)'
+
+
+        # for img_dir in os.listdir("root of data"):
+        #     train_files.append({"image": os.path.join(folder, img_dir),
+        #                         "lobe": os.path.join(
+        #                             "root of lobe seg",
+        #                             img_dir),
+        #                         "airway": os.path.join(
+        #                             "root of airway seg",
+        #                             img_dir),
+        #                         "vessel": os.path.join(
+        #                             "root of vessel seg",
+        #                             img_dir),
+        #                         'text': os.path.join("root of text feature",
+        #                                              img_dir)})
+
+        # self.ds = cache_transformed_train_data_aug_seg(shape=[image_size, image_size, image_size], crop_shape=[image_size, 72, 72],
+        #                                        train_files=train_files)
+
+        # self.ds_eval = cache_transformed_train_data_aug_seg(shape=[image_size, image_size, image_size],
+        #                                            crop_shape=[image_size, 128, 128],
+        #                                            train_files=train_files)
+
+        # print(f'found {len(self.ds)} videos as gif files at {folder}')
+        # assert len(self.ds) > 0, 'need to have at least 1 video to start training (although 1 is not great, try 100k)'
 
         self.dl = cycle(data.DataLoader(self.ds, batch_size=train_batch_size, shuffle=True, pin_memory=True, num_workers=4))
         self.dl_eval = cycle(
@@ -976,24 +992,21 @@ class Trainer(object):
         self.accelerator.load_state(os.path.join(self.results_folder, path), strict=False)
 
     def train(
-            self,
-            prob_focus_present=0.,
-            focus_present_mask=None,
-            log_fn=noop
+        self,
+        prob_focus_present=0.,
+        focus_present_mask=None,
     ):
-        assert callable(log_fn)
-
         while self.step < self.train_num_steps:
             for i in range(self.gradient_accumulate_every):
                 with self.accelerator.accumulate(self.model):
                     data = next(self.dl)
-                    img, text = data["image"], data["text"]
-                    img = img.to(self.accelerator.device).squeeze(dim=2)
+                    # new: normalize between 0 and 1
+                    data = data / 255.0
+                    img = data  # , text = data["image"], data["text"]
+                    img = img.to(self.accelerator.device) # img.to(self.accelerator.device).squeeze(dim=1)
 
                     img_lr = F.interpolate(img, scale_factor=0.25, mode='nearest')
                     img_lr = F.interpolate(img_lr, scale_factor=4, mode='nearest')
-
-                    text = text.to(self.accelerator.device)
 
                     B, C, D, H, W = img.shape
 
@@ -1002,7 +1015,7 @@ class Trainer(object):
                     indexes = []
                     for b in range(img.shape[0]):
                         index = np.random.choice(D - self.num_frames + 1, 1, replace=False)
-                        index = index+np.arange(self.num_frames)#np.sort(np.random.choice(self.num_frames, 64, replace=False)) + index
+                        index = index+np.arange(self.num_frames)
                         indexes.append(torch.from_numpy(index))
                         batch_images_inputs.append(img[b, :, index, ...].unsqueeze(dim=0))
                         batch_images_inputs_lr.append(img_lr[b, :, index, ...].unsqueeze(dim=0))
@@ -1019,9 +1032,8 @@ class Trainer(object):
                         batch_images_inputs,
                         batch_images_inputs_lr,
                         indexes=indexes,
-                        cond=text,
+                        # cond=text,
                         prob_focus_present=prob_focus_present,
-                        focus_present_mask=focus_present_mask
                     )
                     self.accelerator.backward(loss)
 
@@ -1043,91 +1055,129 @@ class Trainer(object):
                     if self.step != 0 and self.step % (self.save_and_sample_every) == 0:
                         milestone = self.step // self.save_and_sample_every
                         self.save(milestone)
-                        data = next(self.dl_eval)
-                        img, text = data["image"], data["text"]
-                        img = img.to(self.accelerator.device).squeeze(dim=2)
 
-                        img_lr = F.interpolate(img, scale_factor=0.25, mode='nearest')
-                        img_lr = F.interpolate(img_lr, scale_factor=4, mode='nearest')
-                        img_lr_save = rearrange(img_lr, 'b c f h w -> (b c) 1 f h w')
+                        # sample and save
+                        for sample_idx in range(self.num_sample_rows):
+                            # sample
+                            sampled_imgs = self.ema_model.sample(batch_size=1, cond=None)
+                            # remove batch and channel dimensions and get 2D slice
+                            sample_img = sampled_imgs[sample_idx, 0, : :, 128]
+                            plt.imsave(
+                                os.path.join(self.results_folder, f"sample_step{self.step}_idx{sample_idx}.png"),
+                                sample_img.cpu().numpy(),
+                                cmap="gray",
+                            )
 
-                        text = text.to(self.accelerator.device)
+                        # data = next(self.dl_eval)
+                        # img, text = data["image"], data["text"]
+                        # img = img.to(self.accelerator.device).squeeze(dim=2)
 
-                        file_name = data['text_meta_dict']['filename_or_obj'][0].split('/')[-1]
+                        # img_lr = F.interpolate(img, scale_factor=0.25, mode='nearest')
+                        # img_lr = F.interpolate(img_lr, scale_factor=4, mode='nearest')
+                        # img_lr_save = rearrange(img_lr, 'b c f h w -> (b c) 1 f h w')
 
-                        one_gif_lr = rearrange(img_lr_save, '(i j) c f h w -> c f (i h) (j w)', i=self.num_sample_rows)
-                        one_gif_lr = (one_gif_lr+1.0)/2.0
-                        video_path = str(self.results_folder / str(f'{str(milestone)}_{file_name}_lr.gif'))
-                        video_tensor_to_gif(one_gif_lr, video_path)
+                        # text = text.to(self.accelerator.device)
 
-                        num_samples = self.num_sample_rows ** 2
-                        batches = num_to_groups(num_samples, self.batch_size)
-                        all_videos_list = list(map(lambda n: self.ema_model.module.sample(batch_size=n, img_lr=img_lr, cond=text), batches))
-                        all_videos_list = torch.cat(all_videos_list, dim=0)
-                        all_videos_list, all_videos_list_lobe, all_videos_list_airway, all_videos_list_vessel = all_videos_list.chunk(
-                            4, dim=1)
-                        all_videos_list = torch.cat(
-                            [all_videos_list, all_videos_list_lobe, all_videos_list_airway, all_videos_list_vessel],
-                            dim=0)
+                        # file_name = data['text_meta_dict']['filename_or_obj'][0].split('/')[-1]
 
-                        # all_videos_list = F.pad(all_videos_list, (2, 2, 2, 2))
+                        # one_gif_lr = rearrange(img_lr_save, '(i j) c f h w -> c f (i h) (j w)', i=self.num_sample_rows)
+                        # one_gif_lr = (one_gif_lr+1.0)/2.0
+                        # video_path = str(self.results_folder / str(f'{str(milestone)}_{file_name}_lr.gif'))
+                        # video_tensor_to_gif(one_gif_lr, video_path)
 
-                        one_gif = rearrange(all_videos_list, '(i j) c f h w -> c f (i h) (j w)', i=self.num_sample_rows)
-                        video_path = str(self.results_folder / str(f'{str(milestone)}_{file_name}.gif'))
-                        video_tensor_to_gif(one_gif, video_path)
+                        # num_samples = self.num_sample_rows ** 2
+                        # batches = num_to_groups(num_samples, self.batch_size)
+                        # all_videos_list = list(map(lambda n: self.ema_model.module.sample(batch_size=n, img_lr=img_lr, cond=text), batches))
+                        # all_videos_list = torch.cat(all_videos_list, dim=0)
+                        # all_videos_list, all_videos_list_lobe, all_videos_list_airway, all_videos_list_vessel = all_videos_list.chunk(
+                        #     4, dim=1)
+                        # all_videos_list = torch.cat(
+                        #     [all_videos_list, all_videos_list_lobe, all_videos_list_airway, all_videos_list_vessel],
+                        #     dim=0)
 
-                        log = {**log, 'sample': video_path}
+                        # # all_videos_list = F.pad(all_videos_list, (2, 2, 2, 2))
 
-                    # log_fn(log)
+                        # one_gif = rearrange(all_videos_list, '(i j) c f h w -> c f (i h) (j w)', i=self.num_sample_rows)
+                        # video_path = str(self.results_folder / str(f'{str(milestone)}_{file_name}.gif'))
+                        # video_tensor_to_gif(one_gif, video_path)
+
+                        # log = {**log, 'sample': video_path}
+
                     self.step += 1
 
         print('training completed')
 
 
-model = Unet3D(
-    dim=56,
-    cond_dim=768,
-    dim_mults=(1, 2, 4, 8),
-    channels=4,
-    attn_heads=4,
-    attn_dim_head=32,
-    use_bert_text_cond=False,
-    init_dim=None,
-    init_kernel_size=7,
-    use_sparse_linear_attn=False,
-    block_type='resnet',
-    resnet_groups=8
-)
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser('medsyn low-res args')
 
-diffusion_model = GaussianDiffusion(
-    denoise_fn=model,
-    image_size=256,
-    num_frames=256,
-    text_use_bert_cls=False,
-    channels=4,
-    timesteps=1000,
-    loss_type='l2',
-    use_dynamic_thres=False,  # from the Imagen paper
-    dynamic_thres_percentile=0.995,
-    volume_depth=256,
-    ddim_timesteps=30,
-)
+    parser.add_argument('--resume', action='store_true', default=False)
 
-trainer = Trainer(diffusion_model=diffusion_model,
-                  folder="Your Data Path",
-                  ema_decay=0.995,
-                  num_frames=64,
-                  train_batch_size=1,
-                  train_lr=1e-4,
-                  train_num_steps=1000000,
-                  gradient_accumulate_every=4,
-                  amp=True,
-                  step_start_ema=10000,
-                  update_ema_every=10,
-                  save_and_sample_every=1000,
-                  results_folder='Your Logs Saving Path',
-                  num_sample_rows=1,
-                  max_grad_norm=1.0)
+    parser.add_argument('--data_dir', type=str, default="",
+                        help='Your Training DATA Path')
+    parser.add_argument('--save_dir', type=str, default="",
+                        help='Your Logs Saving Path')
+    # New arguments by A. Santorum
+    parser.add_argument('--dataset_num_samples', type=int, default=1000,
+                        help='Your Training DATA Number of Samples')
+    parser.add_argument('--dataset_seed', type=int, default=42,
+                        help='Your Training DATA Seed')
+    parser.add_argument('--train_seed', type=int, default=42,
+                        help='Your Training Seed')
+    parser.add_argument('--loss_type', type=str, default='l2', choices=['l2'],
+                        help='Loss type to use for training')
 
-# trainer.load(-1)
-trainer.train()
+    args = parser.parse_args()
+
+    model = Unet3D(
+        dim=56,
+        # cond_dim=768,
+        dim_mults=(1, 2, 4, 8),
+        channels=1,  # originally 4,
+        attn_heads=4,
+        init_dim=None,
+        use_sparse_linear_attn=False,
+    )
+
+    diffusion_model = GaussianDiffusion(
+        denoise_fn=model,
+        image_size=256,
+        num_frames=256,
+        text_use_bert_cls=False,
+        channels=1,  # 4, # originally 4 channels 
+        timesteps=1000,
+        loss_type='l2',
+        use_dynamic_thres=False,  # from the Imagen paper
+        dynamic_thres_percentile=0.995,
+        # volume_depth=256,  not used
+        ddim_timesteps=30,
+    )
+
+    trainer = Trainer(
+        diffusion_model=diffusion_model,
+        folder=args.data_dir,
+        dataset_num_max_samples=args.dataset_num_samples,
+        dataset_seed=args.dataset_seed,
+        ema_decay=0.995,
+        num_frames=64,
+        train_batch_size=1,
+        train_lr=1e-4,
+        train_num_steps=1000000,
+        gradient_accumulate_every=4,
+        amp=True,
+        step_start_ema=10000,
+        update_ema_every=10,
+        save_and_sample_every=1000,
+        results_folder=args.save_dir,
+        num_sample_rows=1,
+        max_grad_norm=1.0,
+    )
+
+    if args.train_seed is not None:
+        print(f"Setting train seed to {args.train_seed} ...")
+        set_seed(int(args.train_seed))
+
+    if args.resume:
+        trainer.load(-1)
+
+    trainer.train()
