@@ -6,17 +6,14 @@ import numpy as np
 from torch import nn, einsum
 import torch.nn.functional as F
 from functools import partial
-
+import nibabel as nib
 from torch.utils import data
 from pathlib import Path
 from torch.optim import AdamW
-from torchvision import transforms as T
-from PIL import Image
 import matplotlib.pyplot as plt
 
 from tqdm import tqdm
 from einops import rearrange
-from dataloader import cache_transformed_train_data_aug_seg
 
 from accelerate import Accelerator
 
@@ -252,7 +249,11 @@ class SpatialLinearAttention(nn.Module):
         x = rearrange(x, 'b c f h w -> (b f) c h w')
 
         qkv = self.to_qkv(x).chunk(3, dim=1)
-        q, k, v = rearrange_many(qkv, 'b (h c) x y -> b h c (x y)', h=self.heads)
+        # Split qkv into q, k, v along channel dimension
+        # Rearrange each tensor
+        q = rearrange(qkv[0], 'b (h c) x y -> b h c (x y)', h=self.heads)
+        k = rearrange(qkv[1], 'b (h c) x y -> b h c (x y)', h=self.heads)
+        v = rearrange(qkv[2], 'b (h c) x y -> b h c (x y)', h=self.heads)
 
         q = q.softmax(dim=-2)
         k = k.softmax(dim=-1)
@@ -354,7 +355,10 @@ class Attention(nn.Module):
 
         # split out heads
 
-        q, k, v = rearrange_many(qkv, '... n (h d) -> ... h n d', h=self.heads)
+        # q, k, v = rearrange_many(qkv, '... n (h d) -> ... h n d', h=self.heads)
+        q = rearrange(qkv[0], '... n (h d) -> ... h n d', h=self.heads)
+        k = rearrange(qkv[1], '... n (h d) -> ... h n d', h=self.heads)
+        v = rearrange(qkv[2], '... n (h d) -> ... h n d', h=self.heads)
 
         # scale
 
@@ -683,7 +687,7 @@ class GaussianDiffusion(nn.Module):
 
     @torch.inference_mode()
     def p_sample_loop(self, shape, cond=None, img_lr=None, cond_scale=1., use_ddim=True):
-        device = self.betas.device
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
         bsz = shape[0]
 
@@ -729,7 +733,7 @@ class GaussianDiffusion(nn.Module):
         return self.p_sample_loop((batch_size, channels, num_frames, image_size, image_size), cond=cond, img_lr=img_lr,
                                       cond_scale=cond_scale, use_ddim=DDIM)
 
-    def p_losses(self, x_start, x_start_lr, t, indexes=None, cond=None, noise=None, **kwargs):
+    def p_losses(self, x_start, x_start_lr, t, cond=None, noise=None, **kwargs):
         b, c, f, h, w, device = *x_start.shape, x_start.device
 
         x_noisy, noise = get_z_t(x_start, t)
@@ -743,7 +747,7 @@ class GaussianDiffusion(nn.Module):
         if cond is not None:
             if np.random.choice(10, 1)==0:
                 cond = cond*0
-        x_recon = self.denoise_fn(x_noisy, t*self.num_timesteps, indexes=indexes, cond=cond, **kwargs)
+        x_recon = self.denoise_fn(x_noisy, t*self.num_timesteps, cond=cond, **kwargs)
 
         if self.loss_type == 'l1':
             loss = F.l1_loss(x_start, x_recon)
@@ -783,23 +787,6 @@ def seek_all_images(img, channels=3):
         i += 1
 
 
-# tensor of shape (channels, frames, height, width) -> gif
-
-def video_tensor_to_gif(tensor, path, duration=120, loop=0, optimize=True):
-    images = map(T.ToPILImage(), tensor.unbind(dim=1))
-    first_img, *rest_imgs = images
-    first_img.save(path, save_all=True, append_images=rest_imgs, duration=duration, loop=loop, optimize=optimize)
-    return images
-
-
-# gif -> (channels, frame, height, width) tensor
-
-def gif_to_tensor(path, channels=3, transform=T.ToTensor()):
-    img = Image.open(path)
-    tensors = tuple(map(transform, seek_all_images(img, channels=channels)))
-    return torch.stack(tensors, dim=1)
-
-
 def identity(t, *args, **kwargs):
     return t
 
@@ -827,37 +814,52 @@ def cast_num_frames(t, *, frames):
 
 class Dataset(data.Dataset):
     def __init__(
-            self,
-            folder,
-            image_size,
-            channels=3,
-            num_frames=16,
-            horizontal_flip=False,
-            force_num_frames=True,
-            exts=['gif']
+        self,
+        folder,
+        num_max_samples=1000,
+        test_flag=False,
+        dataset_seed=None,
+        exts=['nii.gz'],
     ):
+        """
+
+        """
         super().__init__()
         self.folder = folder
-        self.image_size = image_size
-        self.channels = channels
-        self.paths = [p for ext in exts for p in Path(f'{folder}').glob(f'**/*.{ext}')]
+        self.paths = [
+            p.as_posix() for ext in exts for p in Path(f'{folder}').glob(f'**/*-t1n.{ext}')
+        ]
 
-        self.cast_num_frames_fn = partial(cast_num_frames, frames=num_frames) if force_num_frames else identity
+        if dataset_seed is not None:
+            print(f"Setting dataset seed to {dataset_seed} ...")
+            np.random.seed(int(dataset_seed))
+            torch.manual_seed(int(dataset_seed))
 
-        self.transform = T.Compose([
-            T.Resize(image_size),
-            T.RandomHorizontalFlip() if horizontal_flip else T.Lambda(identity),
-            T.CenterCrop(image_size),
-            T.ToTensor()
-        ])
+        np.random.shuffle(self.paths)
+
+        if num_max_samples is not None:
+            if test_flag:
+                print(f"Reading the last {num_max_samples} samples ...")
+                # using the last 'num_max_samples' samples
+                self.paths = self.paths[-int(num_max_samples):]
+            else:
+                print(f"Reading the first {num_max_samples} samples ...")
+                # using the first 'num_max_samples' samples
+                self.paths = self.paths [:int(num_max_samples)]
 
     def __len__(self):
         return len(self.paths)
 
     def __getitem__(self, index):
         path = self.paths[index]
-        tensor = gif_to_tensor(path, self.channels, transform=self.transform)
-        return self.cast_num_frames_fn(tensor)
+        # read image data as numpy array
+        img_data = nib.load(path).get_fdata()
+        # normalize between 0 and 255
+        img_data = 255.0 * (img_data - img_data.min()) / (img_data.max() - img_data.min())
+        img_data = img_data.astype(np.uint8)
+        # convert to tensor
+        tensor = torch.from_numpy(img_data)
+        return tensor.unsqueeze(0).float()
 
 
 # trainer class
@@ -913,34 +915,7 @@ class Trainer(object):
         print(f'Found {len(self.ds)} 3D images at {folder}')
         assert len(self.ds) > 0, 'need to have at least 1 video to start training (although 1 is not great, try 100k)'
 
-
-        # for img_dir in os.listdir("root of data"):
-        #     train_files.append({"image": os.path.join(folder, img_dir),
-        #                         "lobe": os.path.join(
-        #                             "root of lobe seg",
-        #                             img_dir),
-        #                         "airway": os.path.join(
-        #                             "root of airway seg",
-        #                             img_dir),
-        #                         "vessel": os.path.join(
-        #                             "root of vessel seg",
-        #                             img_dir),
-        #                         'text': os.path.join("root of text feature",
-        #                                              img_dir)})
-
-        # self.ds = cache_transformed_train_data_aug_seg(shape=[image_size, image_size, image_size], crop_shape=[image_size, 72, 72],
-        #                                        train_files=train_files)
-
-        # self.ds_eval = cache_transformed_train_data_aug_seg(shape=[image_size, image_size, image_size],
-        #                                            crop_shape=[image_size, 128, 128],
-        #                                            train_files=train_files)
-
-        # print(f'found {len(self.ds)} videos as gif files at {folder}')
-        # assert len(self.ds) > 0, 'need to have at least 1 video to start training (although 1 is not great, try 100k)'
-
         self.dl = cycle(data.DataLoader(self.ds, batch_size=train_batch_size, shuffle=True, pin_memory=True, num_workers=4))
-        self.dl_eval = cycle(
-            data.DataLoader(self.ds_eval, batch_size=1, shuffle=True, pin_memory=True))
         self.opt = AdamW(diffusion_model.parameters(), lr=train_lr, betas=(0.9, 0.999), weight_decay=0.01)
 
         self.step = 0
@@ -991,49 +966,23 @@ class Trainer(object):
 
         self.accelerator.load_state(os.path.join(self.results_folder, path), strict=False)
 
-    def train(
-        self,
-        prob_focus_present=0.,
-        focus_present_mask=None,
-    ):
+    def train(self):
         while self.step < self.train_num_steps:
             for i in range(self.gradient_accumulate_every):
                 with self.accelerator.accumulate(self.model):
-                    data = next(self.dl)
-                    # new: normalize between 0 and 1
-                    data = data / 255.0
-                    img = data  # , text = data["image"], data["text"]
-                    img = img.to(self.accelerator.device) # img.to(self.accelerator.device).squeeze(dim=1)
+                    data = next(self.dl).to(self.accelerator.device)  # Move to device immediately
+                    img = data / 255.0  # Normalize to [0, 1]
 
                     img_lr = F.interpolate(img, scale_factor=0.25, mode='nearest')
                     img_lr = F.interpolate(img_lr, scale_factor=4, mode='nearest')
 
                     B, C, D, H, W = img.shape
 
-                    batch_images_inputs = []
-                    batch_images_inputs_lr = []
-                    indexes = []
-                    for b in range(img.shape[0]):
-                        index = np.random.choice(D - self.num_frames + 1, 1, replace=False)
-                        index = index+np.arange(self.num_frames)
-                        indexes.append(torch.from_numpy(index))
-                        batch_images_inputs.append(img[b, :, index, ...].unsqueeze(dim=0))
-                        batch_images_inputs_lr.append(img_lr[b, :, index, ...].unsqueeze(dim=0))
-
-                    batch_images_inputs = torch.cat(batch_images_inputs, dim=0)
-                    batch_images_inputs_lr = torch.cat(batch_images_inputs_lr, dim=0)
-                    noise = torch.randn_like(batch_images_inputs_lr)
-                    alpha = np.asscalar(np.random.rand(1))*0.4
-                    batch_images_inputs_lr = (1-alpha)*batch_images_inputs_lr + alpha*noise
-
-                    indexes = torch.stack(indexes, dim=0).long().to(self.accelerator.device)
-
                     loss = self.model(
-                        batch_images_inputs,
-                        batch_images_inputs_lr,
-                        indexes=indexes,
-                        # cond=text,
-                        prob_focus_present=prob_focus_present,
+                        img,
+                        img_lr,
+                        # indexes=indexes,  # not used
+                        # cond=text,  # text conditioning not used
                     )
                     self.accelerator.backward(loss)
 
@@ -1046,7 +995,6 @@ class Trainer(object):
                 self.opt.step()
                 self.opt.zero_grad()
 
-
             if self.accelerator.sync_gradients:
                 if self.step % self.update_ema_every == 0:
                     self.step_ema()
@@ -1056,52 +1004,18 @@ class Trainer(object):
                         milestone = self.step // self.save_and_sample_every
                         self.save(milestone)
 
-                        # sample and save
-                        for sample_idx in range(self.num_sample_rows):
-                            # sample
-                            sampled_imgs = self.ema_model.sample(batch_size=1, cond=None)
-                            # remove batch and channel dimensions and get 2D slice
-                            sample_img = sampled_imgs[sample_idx, 0, : :, 128]
-                            plt.imsave(
-                                os.path.join(self.results_folder, f"sample_step{self.step}_idx{sample_idx}.png"),
-                                sample_img.cpu().numpy(),
-                                cmap="gray",
-                            )
-
-                        # data = next(self.dl_eval)
-                        # img, text = data["image"], data["text"]
-                        # img = img.to(self.accelerator.device).squeeze(dim=2)
-
-                        # img_lr = F.interpolate(img, scale_factor=0.25, mode='nearest')
-                        # img_lr = F.interpolate(img_lr, scale_factor=4, mode='nearest')
-                        # img_lr_save = rearrange(img_lr, 'b c f h w -> (b c) 1 f h w')
-
-                        # text = text.to(self.accelerator.device)
-
-                        # file_name = data['text_meta_dict']['filename_or_obj'][0].split('/')[-1]
-
-                        # one_gif_lr = rearrange(img_lr_save, '(i j) c f h w -> c f (i h) (j w)', i=self.num_sample_rows)
-                        # one_gif_lr = (one_gif_lr+1.0)/2.0
-                        # video_path = str(self.results_folder / str(f'{str(milestone)}_{file_name}_lr.gif'))
-                        # video_tensor_to_gif(one_gif_lr, video_path)
-
-                        # num_samples = self.num_sample_rows ** 2
-                        # batches = num_to_groups(num_samples, self.batch_size)
-                        # all_videos_list = list(map(lambda n: self.ema_model.module.sample(batch_size=n, img_lr=img_lr, cond=text), batches))
-                        # all_videos_list = torch.cat(all_videos_list, dim=0)
-                        # all_videos_list, all_videos_list_lobe, all_videos_list_airway, all_videos_list_vessel = all_videos_list.chunk(
-                        #     4, dim=1)
-                        # all_videos_list = torch.cat(
-                        #     [all_videos_list, all_videos_list_lobe, all_videos_list_airway, all_videos_list_vessel],
-                        #     dim=0)
-
-                        # # all_videos_list = F.pad(all_videos_list, (2, 2, 2, 2))
-
-                        # one_gif = rearrange(all_videos_list, '(i j) c f h w -> c f (i h) (j w)', i=self.num_sample_rows)
-                        # video_path = str(self.results_folder / str(f'{str(milestone)}_{file_name}.gif'))
-                        # video_tensor_to_gif(one_gif, video_path)
-
-                        # log = {**log, 'sample': video_path}
+                        # # sample and save
+                        # for sample_idx in range(self.num_sample_rows):
+                        #     # sample
+                        #     sampled_imgs = self.ema_model.sample(batch_size=1, img_lr=img_lr, cond=None)
+                        #     print(f"sampled image no. {sample_idx+1} of shape: {sampled_imgs.shape}")
+                        #     # remove batch and channel dimensions and get 2D slice
+                        #     sample_img = sampled_imgs[sample_idx, 0, : :, 128]
+                        #     plt.imsave(
+                        #         os.path.join(self.results_folder, f"sample_step{self.step}_idx{sample_idx}.png"),
+                        #         sample_img.cpu().numpy(),
+                        #         cmap="gray",
+                        #     )
 
                     self.step += 1
 
@@ -1167,7 +1081,7 @@ if __name__ == '__main__':
         amp=True,
         step_start_ema=10000,
         update_ema_every=10,
-        save_and_sample_every=1000,
+        save_and_sample_every=10000,
         results_folder=args.save_dir,
         num_sample_rows=1,
         max_grad_norm=1.0,
