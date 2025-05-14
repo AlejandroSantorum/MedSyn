@@ -994,6 +994,8 @@ if __name__ == '__main__':
     parser.add_argument('--save_dir', type=str, default="",
                         help='Your Logs Saving Path')
     # New arguments by A. Santorum
+    parser.add_argument('--img_size', type=int, default=64,
+                        help='Your Training DATA Image Size')
     parser.add_argument('--dataset_num_samples', type=int, default=1000,
                         help='Your Training DATA Number of Samples')
     parser.add_argument('--dataset_seed', type=int, default=42,
@@ -1012,17 +1014,14 @@ if __name__ == '__main__':
         channels=1, # 4, # originally 4 channels
     )
 
-    # image of size (N, D, H, W) = (1, 64, 64, 64)
+    # image of size (N, D, H, W)
     diffusion_model = GaussianDiffusion(
         denoise_fn=model,
-        image_size=64,  # 64 x 64
-        num_frames=64,  # 64
-        text_use_bert_cls=False,
+        image_size=args.img_size,
+        num_frames=args.img_size,
         channels=1,  # 4, # originally 4 channels 
         timesteps=1000,
-        use_dynamic_thres=False,  # from the Imagen paper
         dynamic_thres_percentile=0.995,
-        # volume_depth=64,  # not used
         ddim_timesteps=50,
         loss_type=args.loss_type,
     )
@@ -1040,7 +1039,7 @@ if __name__ == '__main__':
         amp=True,
         step_start_ema=10000,
         update_ema_every=1,
-        save_and_sample_every=5000,
+        save_and_sample_every=10000,
         results_folder=args.save_dir,
         num_sample_rows=1,
         max_grad_norm=1.0,
