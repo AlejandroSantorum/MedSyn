@@ -4,7 +4,6 @@ import copy
 import matplotlib.pyplot as plt
 import numpy as np
 from torch.utils import data
-from pathlib import Path
 from torch.optim import AdamW
 import nibabel as nib
 import os
@@ -128,6 +127,9 @@ class Evaluator(object):
 
 
     def eval_in_batches(self):
+        """
+        NOTE: Not working yet
+        """
         # get the number of samples in batches
         batches = num_to_groups(self.num_eval_samples, self.batch_size)
 
