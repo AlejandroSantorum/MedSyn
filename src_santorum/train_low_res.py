@@ -1,4 +1,6 @@
 import os
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
 import math
 import copy
 import torch
@@ -1007,8 +1009,10 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
+    unet_dim = 96 if args.img_size > 64 else 160
+
     model = Unet3D(
-        dim=160,
+        dim=unet_dim, # originally: 160,
         # cond_dim=768,  # used for BERT text conditioning
         dim_mults=(1, 2, 4, 8),
         channels=1, # 4, # originally 4 channels
@@ -1032,14 +1036,14 @@ if __name__ == '__main__':
         dataset_num_max_samples=args.dataset_num_samples,
         dataset_seed=args.dataset_seed,
         ema_decay=0.999,
-        train_batch_size=4,
+        train_batch_size=1,
         train_lr=1e-4,
         train_num_steps=1000000,
-        gradient_accumulate_every=4,
+        gradient_accumulate_every=2,
         amp=True,
         step_start_ema=10000,
         update_ema_every=1,
-        save_and_sample_every=10000,
+        save_and_sample_every=1000,
         results_folder=args.save_dir,
         num_sample_rows=1,
         max_grad_norm=1.0,
